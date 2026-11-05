@@ -7,9 +7,25 @@
     "typecheck": "bun check"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@mikro-orm/cli": "^7.2.7",
+    "@nestjs/testing": "^12.3.3",
+    "@types/bun": "latest",
+    "@types/express": "^5.0.6"
   },
   "peerDependencies": {
     "typescript": "^7"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1162.0",
+    "@mikro-orm/core": "^7.2.7",
+    "@mikro-orm/migrations": "^7.2.7",
+    "@mikro-orm/nestjs": "^7.1.0",
+    "@mikro-orm/postgresql": "^7.2.7",
+    "@nestjs/common": "^12.3.3",
+    "@nestjs/core": "^12.3.3",
+    "@nestjs/platform-express": "^12.3.3",
+    "decimal.js": "^10.6.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
   }
 }
