@@ -4,7 +4,12 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "typecheck": "bun check"
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "migration:up": "bun src/infrastructure/persistence/migrate.ts up",
+    "migration:down": "bun src/infrastructure/persistence/migrate.ts down",
+    "migration:reset": "bun src/infrastructure/persistence/migrate.ts reset"
   },
   "devDependencies": {
     "@mikro-orm/cli": "^7.2.7",
