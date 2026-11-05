@@ -1,4 +1,4 @@
-/** Erro base de regra de domínio. O `code` é estável e legível por máquina. */
+/** Erro base de regra de domínio **/
 export abstract class DomainError extends Error {
   abstract readonly code: string;
 
@@ -14,4 +14,16 @@ export class InvalidMoneyError extends DomainError {
 
 export class CurrencyMismatchError extends DomainError {
   readonly code = "CURRENCY_MISMATCH";
+}
+
+export class InsufficientFundsError extends DomainError {
+  readonly code = "INSUFFICIENT_FUNDS";
+}
+
+export class InvalidLedgerEntryError extends DomainError {
+  readonly code = "INVALID_LEDGER_ENTRY";
+}
+
+export class InvalidWalletError extends DomainError {
+  readonly code = "INVALID_WALLET";
 }

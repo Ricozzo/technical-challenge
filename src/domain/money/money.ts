@@ -4,15 +4,13 @@ import {
   InvalidMoneyError,
 } from "../errors/domain-errors";
 
-// Cópia isolada do Decimal, para não depender de configuração global.
 const D = Decimal.clone({ precision: 40 });
 
 export interface MoneyProps {
-  amount: string; // decimal string, ex.: "25.00"
-  currency: string; // ISO-4217, ex.: "BRL"
+  amount: string; 
+  currency: string;
 }
 
-// Só dígitos, com até 2 casas. Recusa: vazio, "NaN", "Infinity", "1e3", "-5", "1.234".
 const AMOUNT_PATTERN = /^\d+(\.\d{1,2})?$/;
 const CURRENCY_PATTERN = /^[A-Z]{3}$/;
 
@@ -39,7 +37,6 @@ export class Money {
     return Money.from({ amount: "0.00", currency });
   }
 
-  /** Uso interno: o resultado de uma operação pode ser negativo (ex.: 10 - 30). */
   private static of(value: Decimal, currency: string): Money {
     return new Money(value, currency);
   }
