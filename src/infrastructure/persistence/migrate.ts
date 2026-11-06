@@ -11,7 +11,7 @@ try {
     case "up":
       await migrator.up();
       break;
-    case "down": // desfaz só a última
+    case "down":
       await migrator.down();
       break;
     case "down-all":

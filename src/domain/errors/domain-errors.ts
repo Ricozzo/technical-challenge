@@ -35,3 +35,7 @@ export class InvalidTransactionError extends DomainError {
 export class InvalidTransactionStateError extends DomainError {
   readonly code = "INVALID_TRANSACTION_STATE";
 }
+
+export class InvalidMessageStateError extends DomainError {
+  readonly code = "INVALID_MESSAGE_STATE";
+}
