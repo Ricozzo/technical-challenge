@@ -45,14 +45,26 @@ export interface WagerTransactionState {
 }
 
 const ALLOWED_TRANSITIONS: Record<Status, readonly Status[]> = {
-  [Status.Pending]: [Status.PendingReference, Status.Processed, Status.Rejected, Status.Failed],
-  [Status.PendingReference]: [Status.PendingReference, Status.Processed, Status.Rejected, Status.Failed],
+  [Status.Pending]: [
+    Status.PendingReference,
+    Status.Processed,
+    Status.Rejected,
+    Status.Failed,
+  ],
+  [Status.PendingReference]: [
+    Status.PendingReference,
+    Status.Processed,
+    Status.Rejected,
+    Status.Failed,
+  ],
   [Status.Processed]: [],
   [Status.Rejected]: [],
   [Status.Failed]: [],
 };
 
 const ACCEPTED_REFERENCE_KINDS: Partial<Record<Kind, readonly Kind[]>> = {
+  [Kind.Win]: [Kind.Bet],
+  [Kind.Loss]: [Kind.Bet],
   [Kind.Refund]: [Kind.Bet],
   [Kind.Rollback]: [Kind.Bet, Kind.Win, Kind.Refund],
 };
@@ -80,7 +92,9 @@ export class WagerTransaction {
 
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     if (props.kind === Kind.Opening) {
-      throw new InvalidTransactionError("OPENING is internal and cannot be submitted");
+      throw new InvalidTransactionError(
+        "OPENING is internal and cannot be submitted",
+      );
     }
     WagerTransaction.validateShape(props);
     return WagerTransaction.build(props, props.now ?? new Date());
@@ -146,10 +160,11 @@ export class WagerTransaction {
     return this._processedAt;
   }
 
-
   markProcessed(referenceTransactionId: string | undefined, at: Date): void {
     if (this.requiresReference() && referenceTransactionId === undefined) {
-      throw new InvalidTransactionError(`${this.kind} cannot be processed without a reference`);
+      throw new InvalidTransactionError(
+        `${this.kind} cannot be processed without a reference`,
+      );
     }
     this.transitionTo(Status.Processed);
     this._referenceTransactionId = referenceTransactionId;
@@ -162,7 +177,9 @@ export class WagerTransaction {
 
   reject(code: FailureCode): void {
     if (isInfrastructureFailure(code)) {
-      throw new InvalidTransactionError(`${code} is an infrastructure code, use fail()`);
+      throw new InvalidTransactionError(
+        `${code} is an infrastructure code, use fail()`,
+      );
     }
     this.transitionTo(Status.Rejected);
     this._failureCode = code;
@@ -170,7 +187,9 @@ export class WagerTransaction {
 
   fail(code: FailureCode): void {
     if (!isInfrastructureFailure(code)) {
-      throw new InvalidTransactionError(`${code} is a business code, use reject()`);
+      throw new InvalidTransactionError(
+        `${code} is a business code, use reject()`,
+      );
     }
     this.transitionTo(Status.Failed);
     this._failureCode = code;
@@ -189,7 +208,9 @@ export class WagerTransaction {
   }
 
   acceptsReferenceKind(referenceKind: Kind): boolean {
-    return ACCEPTED_REFERENCE_KINDS[this.kind]?.includes(referenceKind) ?? false;
+    return (
+      ACCEPTED_REFERENCE_KINDS[this.kind]?.includes(referenceKind) ?? false
+    );
   }
 
   matchesPayload(payloadHash: string): boolean {
@@ -205,13 +226,19 @@ export class WagerTransaction {
       case Kind.Bet:
         return LedgerDirection.Debit;
       case Kind.Loss:
-        throw new InvalidTransactionError("LOSS does not produce a ledger entry");
+        throw new InvalidTransactionError(
+          "LOSS does not produce a ledger entry",
+        );
       case Kind.Rollback: {
         if (!reference) {
-          throw new InvalidTransactionError("ROLLBACK needs its reference to define the direction");
+          throw new InvalidTransactionError(
+            "ROLLBACK needs its reference to define the direction",
+          );
         }
         if (!this.acceptsReferenceKind(reference.kind)) {
-          throw new InvalidTransactionError(`ROLLBACK cannot reference ${reference.kind}`);
+          throw new InvalidTransactionError(
+            `ROLLBACK cannot reference ${reference.kind}`,
+          );
         }
         return reference.ledgerDirectionFor() === LedgerDirection.Debit
           ? LedgerDirection.Credit
@@ -222,31 +249,43 @@ export class WagerTransaction {
 
   private transitionTo(next: Status): void {
     if (!ALLOWED_TRANSITIONS[this._status].includes(next)) {
-      throw new InvalidTransactionStateError(`Cannot move from ${this._status} to ${next}`);
+      throw new InvalidTransactionStateError(
+        `Cannot move from ${this._status} to ${next}`,
+      );
     }
     this._status = next;
   }
 
   private static validateShape(props: CreateWagerTransactionProps): void {
-    const needsReference = props.kind === Kind.Refund || props.kind === Kind.Rollback;
+    const needsReference =
+      props.kind === Kind.Refund || props.kind === Kind.Rollback;
     const reference = props.referenceExternalTransactionId;
 
     if (needsReference && !reference) {
-      throw new InvalidTransactionError(`${props.kind} requires referenceExternalTransactionId`);
+      throw new InvalidTransactionError(
+        `${props.kind} requires referenceExternalTransactionId`,
+      );
     }
     if (props.kind === Kind.Bet && reference) {
       throw new InvalidTransactionError("BET cannot have a reference");
     }
     if (reference === props.externalTransactionId) {
-      throw new InvalidTransactionError("A transaction cannot reference itself");
+      throw new InvalidTransactionError(
+        "A transaction cannot reference itself",
+      );
     }
     // LOSS pode ter valor zero. Todos os outros precisam de valor positivo.
     if (props.kind !== Kind.Loss && !props.money.isPositive()) {
-      throw new InvalidTransactionError(`${props.kind} amount must be positive`);
+      throw new InvalidTransactionError(
+        `${props.kind} amount must be positive`,
+      );
     }
   }
 
-  private static build(props: CreateWagerTransactionProps, now: Date): WagerTransaction {
+  private static build(
+    props: CreateWagerTransactionProps,
+    now: Date,
+  ): WagerTransaction {
     return new WagerTransaction(
       props.id,
       props.providerId,

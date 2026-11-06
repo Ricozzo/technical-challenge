@@ -1,6 +1,7 @@
 import { Migrator } from "@mikro-orm/migrations";
 import { defineConfig } from "@mikro-orm/postgresql";
 import { Migration20261105190000 } from "./migrations/Migration20261105190000";
+import { Migration20261106100000 } from "./migrations/Migration20261106100000";
 
 export function buildConfig(dbName?: string) {
   return defineConfig({
@@ -15,6 +16,7 @@ export function buildConfig(dbName?: string) {
     migrations: {
       migrationsList: [
         { name: "Migration20261105190000", class: Migration20261105190000 },
+        { name: "Migration20261106100000", class: Migration20261106100000 },
       ],
       transactional: true,
       allOrNothing: true,

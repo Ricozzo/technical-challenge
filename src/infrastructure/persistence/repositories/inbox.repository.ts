@@ -39,7 +39,8 @@ export class SqlInboxRepository implements InboxRepository {
   async markProcessed(message: InboxMessage): Promise<void> {
     await query(
       this.em,
-      `update inbox_messages set processed_at = ? where consumer_name = ? and message_id = ?`,
+      `update inbox_messages set processed_at = coalesce(processed_at, ?)
+        where consumer_name = ? and message_id = ?`,
       [message.processedAt ?? null, message.consumerName, message.messageId],
     );
   }

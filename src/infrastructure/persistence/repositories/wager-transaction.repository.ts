@@ -28,7 +28,8 @@ function toStored(row: Row): StoredWagerTransaction {
     gameId: row.game_id,
     kind: row.kind as WagerTransactionKind,
     money: moneyFromDb(row.amount, row.currency),
-    referenceExternalTransactionId: row.reference_external_transaction_id ?? undefined,
+    referenceExternalTransactionId:
+      row.reference_external_transaction_id ?? undefined,
     createdAt: new Date(row.created_at),
     status: row.status as WagerTransactionStatus,
     referenceTransactionId: row.reference_transaction_id ?? undefined,
@@ -38,9 +39,13 @@ function toStored(row: Row): StoredWagerTransaction {
   return {
     transaction,
     resultingBalance:
-      row.resulting_balance === null ? undefined : moneyFromDb(row.resulting_balance, row.currency),
+      row.resulting_balance === null
+        ? undefined
+        : moneyFromDb(row.resulting_balance, row.currency),
     attempts: Number(row.attempts),
-    nextAttemptAt: row.next_attempt_at ? new Date(row.next_attempt_at) : undefined,
+    nextAttemptAt: row.next_attempt_at
+      ? new Date(row.next_attempt_at)
+      : undefined,
   };
 }
 
@@ -79,11 +84,18 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
   }
 
   async findById(id: string): Promise<StoredWagerTransaction | undefined> {
-    const rows = await query(this.em, `select ${COLUMNS} from wager_transactions where id = ?`, [id]);
+    const rows = await query(
+      this.em,
+      `select ${COLUMNS} from wager_transactions where id = ?`,
+      [id],
+    );
     return rows[0] ? toStored(rows[0]) : undefined;
   }
 
-  async findByIdempotencyKey(providerId: string, key: string): Promise<StoredWagerTransaction | undefined> {
+  async findByIdempotencyKey(
+    providerId: string,
+    key: string,
+  ): Promise<StoredWagerTransaction | undefined> {
     const rows = await query(
       this.em,
       `select ${COLUMNS} from wager_transactions where provider_id = ? and idempotency_key = ?`,
@@ -92,7 +104,10 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
     return rows[0] ? toStored(rows[0]) : undefined;
   }
 
-  async findByExternalId(providerId: string, externalId: string): Promise<StoredWagerTransaction | undefined> {
+  async findByExternalId(
+    providerId: string,
+    externalId: string,
+  ): Promise<StoredWagerTransaction | undefined> {
     const rows = await query(
       this.em,
       `select ${COLUMNS} from wager_transactions where provider_id = ? and external_transaction_id = ?`,
@@ -101,7 +116,9 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
     return rows[0] ? toStored(rows[0]) : undefined;
   }
 
-  async existsProcessedReversalOf(referenceTransactionId: string): Promise<boolean> {
+  async existsProcessedReversalOf(
+    referenceTransactionId: string,
+  ): Promise<boolean> {
     const rows = await query(
       this.em,
       `select 1 as found from wager_transactions
@@ -112,12 +129,20 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
     return rows.length > 0;
   }
 
-  async save(tx: WagerTransaction, opts: { resultingBalance?: Money } = {}): Promise<void> {
+  async save(
+    tx: WagerTransaction,
+    opts: {
+      resultingBalance?: Money;
+      retry?: { attempts: number; nextAttemptAt: Date | null };
+    } = {},
+  ): Promise<void> {
     const rows = await query(
       this.em,
       `update wager_transactions
           set status = ?, failure_code = ?, processed_at = ?, reference_transaction_id = ?,
-              resulting_balance = coalesce(?::numeric, resulting_balance)
+              resulting_balance = coalesce(?::numeric, resulting_balance),
+              attempts = coalesce(?::int, attempts),
+              next_attempt_at = case when ?::boolean then ?::timestamptz else next_attempt_at end
         where id = ?
         returning id`,
       [
@@ -126,9 +151,13 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
         tx.processedAt ?? null,
         tx.referenceTransactionId ?? null,
         opts.resultingBalance?.toJSON().amount ?? null,
+        opts.retry?.attempts ?? null,
+        opts.retry !== undefined,
+        opts.retry?.nextAttemptAt ?? null,
         tx.id,
       ],
     );
-    if (rows.length !== 1) throw new Error(`Wager transaction ${tx.id} was not found`);
+    if (rows.length !== 1)
+      throw new Error(`Wager transaction ${tx.id} was not found`);
   }
 }

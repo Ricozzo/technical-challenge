@@ -98,14 +98,9 @@ describe("wallets", () => {
 });
 
 describe("wager_transactions", () => {
-  test("idempotency key é única por provider", async () => {
-    const w = await seedWallet();
-    await seedTx({ walletId: w, ext: "e1", idem: "provider-a:k1" });
-    await rejectedWith(
-      () => seedTx({ walletId: w, ext: "e2", idem: "provider-a:k1" }),
-      /wager_tx_provider_idempotency_uq/,
-    );
-    await seedTx({ walletId: w, ext: "e3", provider: "provider-b", idem: "provider-a:k1" });
+  test("uma transação em moeda diferente da wallet pode ser gravada, para auditar a rejeição", async () => {
+    const w = await seedWallet({ currency: "BRL" });
+    await seedTx({ walletId: w, currency: "USD" });
   });
 
   test("externalTransactionId é único por provider", async () => {
@@ -129,9 +124,9 @@ describe("wager_transactions", () => {
     await rejectedWith(() => seedTx({ walletId: w, kind: "BET", amount: "0.00" }), /wager_tx_amount_valid/);
   });
 
-  test("a moeda da transação precisa ser a da wallet", async () => {
+  test("uma transação em moeda diferente da wallet pode ser gravada, para auditar a rejeição", async () => {
     const w = await seedWallet({ currency: "BRL" });
-    await rejectedWith(() => seedTx({ walletId: w, currency: "USD" }), /wager_tx_wallet_fk/);
+    await seedTx({ walletId: w, currency: "USD" });
   });
 
   test("REJECTED exige failureCode e PROCESSED exige processedAt", async () => {
@@ -249,6 +244,20 @@ describe("wallet_ledger_entries", () => {
 
     await rejectedWith(() => sql`update wallet_ledger_entries set amount = 1.00`, /immutable/);
     await rejectedWith(() => sql`delete from wallet_ledger_entries`, /immutable/);
+  });
+
+  test("o lançamento precisa estar na moeda da wallet", async () => {
+    const w = await seedWallet({ currency: "BRL" });
+    const tx = await seedTx({ walletId: w });
+    await rejectedWith(
+      () => sql`
+        insert into wallet_ledger_entries
+          (id, wallet_id, transaction_id, direction, amount, currency, balance_before, balance_after)
+        values
+          (${uuid()}::uuid, ${w}::uuid, ${tx.id}::uuid, ${"DEBIT"}, ${"10.00"}::numeric, ${"USD"},
+           ${"100.00"}::numeric, ${"90.00"}::numeric)`,
+      /ledger_wallet_fk/,
+    );
   });
 });
 

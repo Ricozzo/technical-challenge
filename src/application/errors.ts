@@ -11,3 +11,7 @@ export class WalletAlreadyExistsError extends DomainError {
 export class ConcurrentModificationError extends DomainError {
   readonly code = "CONCURRENT_MODIFICATION";
 }
+
+export class IdempotencyConflictError extends DomainError {
+  readonly code = "IDEMPOTENCY_CONFLICT";
+}

@@ -3,7 +3,9 @@ import { buildConfig } from "../../src/infrastructure/persistence/mikro-orm.conf
 import { MikroOrmUnitOfWork } from "../../src/infrastructure/persistence/mikro-orm-unit-of-work";
 
 export async function createTestContext() {
-  const orm = await MikroORM.init(buildConfig(process.env.DB_NAME_TEST ?? "wagering_test"));
+  const orm = await MikroORM.init(
+    buildConfig(process.env.DB_NAME_TEST ?? "wagering_test"),
+  );
   await orm.migrator.up();
   const uow = new MikroOrmUnitOfWork(orm);
 
@@ -17,8 +19,18 @@ export async function createTestContext() {
       );
     },
     count: async (table: string): Promise<number> => {
-      const rows = (await orm.em.execute(`select count(*)::int as n from ${table}`)) as unknown as { n: number }[];
+      const rows = (await orm.em.execute(
+        `select count(*)::int as n from ${table}`,
+      )) as unknown as { n: number }[];
       return rows[0]?.n ?? 0;
+    },
+    eventTypes: async (): Promise<string[]> => {
+      const rows = (await orm.em.execute(
+        "select event_type from outbox_messages",
+      )) as unknown as {
+        event_type: string;
+      }[];
+      return rows.map((r) => r.event_type).sort();
     },
     close: () => orm.close(),
   };

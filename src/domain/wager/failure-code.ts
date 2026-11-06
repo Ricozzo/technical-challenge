@@ -8,7 +8,7 @@ export enum FailureCode {
   AlreadyReversed = "ALREADY_REVERSED",
   CurrencyMismatch = "CURRENCY_MISMATCH",
   AmountMismatch = "AMOUNT_MISMATCH",
-
+  PlayerMismatch = "PLAYER_MISMATCH",
   InternalError = "INTERNAL_ERROR",
 }
 

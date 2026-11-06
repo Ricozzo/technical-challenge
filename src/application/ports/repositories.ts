@@ -28,7 +28,13 @@ export interface WagerTransactionRepository {
   findByIdempotencyKey(providerId: string, key: string): Promise<StoredWagerTransaction | undefined>;
   findByExternalId(providerId: string, externalId: string): Promise<StoredWagerTransaction | undefined>;
   existsProcessedReversalOf(referenceTransactionId: string): Promise<boolean>;
-  save(tx: WagerTransaction, opts?: { resultingBalance?: Money }): Promise<void>;
+  save(
+    tx: WagerTransaction,
+    opts?: {
+      resultingBalance?: Money;
+      retry?: { attempts: number; nextAttemptAt: Date | null };
+    },
+  ): Promise<void>;
 }
 
 export interface LedgerRepository {
