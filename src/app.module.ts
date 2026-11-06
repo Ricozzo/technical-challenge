@@ -1,12 +1,23 @@
 import { SQSClient } from "@aws-sdk/client-sqs";
-import { Inject, Injectable, Module, type OnModuleDestroy } from "@nestjs/common";
+import {
+  Inject,
+  Injectable,
+  Module,
+  type OnApplicationBootstrap,
+  type OnApplicationShutdown,
+  type OnModuleDestroy,
+} from "@nestjs/common";
 import { MikroORM } from "@mikro-orm/postgresql";
+import type { EventPublisher } from "./application/ports/event-publisher";
 import type { LoggerPort, MetricsPort } from "./application/ports/observability";
 import type { UnitOfWork } from "./application/ports/repositories";
 import { OpenWalletUseCase } from "./application/use-cases/open-wallet";
 import { ProcessWagerTransactionUseCase } from "./application/use-cases/process-wager-transaction";
+import { PublishOutboxUseCase } from "./application/use-cases/publish-outbox";
 import { WagerQueries } from "./application/use-cases/queries";
 import { ReconcileWalletUseCase } from "./application/use-cases/reconcile-wallet";
+import { OutboxPublisherWorker } from "./infrastructure/messaging/outbox-publisher.worker";
+import { SqsEventPublisher } from "./infrastructure/messaging/sqs-event-publisher";
 import { JsonLogger } from "./infrastructure/observability/json-logger";
 import { MetricsRegistry } from "./infrastructure/observability/metrics-registry";
 import { buildConfig } from "./infrastructure/persistence/mikro-orm.config";
@@ -16,19 +27,42 @@ import { MetricsController } from "./interfaces/http/metrics.controller";
 import { ProvidersController } from "./interfaces/http/providers.controller";
 import { WageringController } from "./interfaces/http/wagering.controller";
 import { WalletsController } from "./interfaces/http/wallets.controller";
-import { LOGGER, METRICS, ORM, SQS_CLIENT, UNIT_OF_WORK } from "./tokens";
+import { EVENT_PUBLISHER, LOGGER, METRICS, ORM, SQS_CLIENT, UNIT_OF_WORK } from "./tokens";
 
-/** Fecha o pool do banco e o cliente SQS quando a aplicação encerra. */
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing environment variable ${name}`);
+  return value;
+}
+
+/**
+ * Fecha o pool do banco e o cliente SQS por último. O onApplicationShutdown só roda depois
+ * de todos os onModuleDestroy, então o worker já terminou o que estava fazendo.
+ */
 @Injectable()
-export class ResourceLifecycle implements OnModuleDestroy {
+export class ResourceLifecycle implements OnApplicationShutdown {
   constructor(
     @Inject(ORM) private readonly orm: MikroORM,
     @Inject(SQS_CLIENT) private readonly sqs: SQSClient,
   ) {}
 
-  async onModuleDestroy(): Promise<void> {
+  async onApplicationShutdown(): Promise<void> {
     this.sqs.destroy();
     await this.orm.close();
+  }
+}
+
+/** Liga o publisher da outbox no boot e o desliga, esperando a rodada em andamento, no encerramento. */
+@Injectable()
+export class OutboxPublisherLifecycle implements OnApplicationBootstrap, OnModuleDestroy {
+  constructor(@Inject(OutboxPublisherWorker) private readonly worker: OutboxPublisherWorker) {}
+
+  onApplicationBootstrap(): void {
+    if (process.env.OUTBOX_PUBLISHER_ENABLED !== "false") this.worker.start();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.worker.stop();
   }
 }
 
@@ -55,6 +89,11 @@ export class ResourceLifecycle implements OnModuleDestroy {
         }),
     },
     {
+      provide: EVENT_PUBLISHER,
+      inject: [SQS_CLIENT],
+      useFactory: (sqs: SQSClient) => new SqsEventPublisher(sqs, requiredEnv("SQS_EVENTS_QUEUE_URL")),
+    },
+    {
       provide: OpenWalletUseCase,
       inject: [UNIT_OF_WORK],
       useFactory: (uow: UnitOfWork) => new OpenWalletUseCase({ uow }),
@@ -75,6 +114,29 @@ export class ResourceLifecycle implements OnModuleDestroy {
       useFactory: (uow: UnitOfWork, logger: LoggerPort, metrics: MetricsPort) =>
         new ReconcileWalletUseCase({ uow, logger, metrics }),
     },
+    {
+      provide: PublishOutboxUseCase,
+      inject: [UNIT_OF_WORK, EVENT_PUBLISHER, LOGGER, METRICS],
+      useFactory: (uow: UnitOfWork, publisher: EventPublisher, logger: LoggerPort, metrics: MetricsPort) =>
+        new PublishOutboxUseCase({
+          uow,
+          publisher,
+          logger,
+          metrics,
+          batchSize: Number(process.env.OUTBOX_BATCH_SIZE ?? 20),
+        }),
+    },
+    {
+      provide: OutboxPublisherWorker,
+      inject: [PublishOutboxUseCase, LOGGER],
+      useFactory: (useCase: PublishOutboxUseCase, logger: LoggerPort) =>
+        new OutboxPublisherWorker({
+          useCase,
+          logger,
+          idleDelayMs: Number(process.env.OUTBOX_POLL_INTERVAL_MS ?? 500),
+        }),
+    },
+    OutboxPublisherLifecycle,
     ResourceLifecycle,
   ],
 })

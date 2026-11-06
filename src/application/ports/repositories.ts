@@ -58,6 +58,8 @@ export interface InboxRepository {
 
 export interface OutboxRepository {
   add(message: OutboxMessage): Promise<void>;
+  claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
+  save(message: OutboxMessage, opts?: { error?: string }): Promise<void>;
 }
 
 export interface Repositories {
