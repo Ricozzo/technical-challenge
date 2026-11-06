@@ -31,6 +31,8 @@ import { WageringController } from "./interfaces/http/wagering.controller";
 import { WalletsController } from "./interfaces/http/wallets.controller";
 import { WagerQueueConsumer } from "./interfaces/sqs/wager-consumer";
 import { EVENT_PUBLISHER, LOGGER, METRICS, ORM, SQS_CLIENT, UNIT_OF_WORK } from "./tokens";
+import { ReportOutboxStatsUseCase } from "./application/use-cases/report-outbox-stats";
+import { describeMetrics } from "./infrastructure/observability/metrics-catalog";
 
 
 function requiredEnv(name: string): string {
@@ -98,6 +100,29 @@ export class PendingReferenceLifecycle implements OnApplicationBootstrap, OnModu
   }
 }
 
+/** Registra os gauges que vêm do banco: o /metrics os atualiza a cada scrape. */
+@Injectable()
+export class MetricsCollectorsLifecycle implements OnApplicationBootstrap {
+  constructor(
+    @Inject(METRICS) private readonly metrics: MetricsRegistry,
+    @Inject(ReportOutboxStatsUseCase) private readonly outboxStats: ReportOutboxStatsUseCase,
+    @Inject(LOGGER) private readonly logger: LoggerPort,
+  ) {}
+
+  onApplicationBootstrap(): void {
+    this.metrics.registerCollector(async () => {
+      try {
+        await this.outboxStats.execute();
+      } catch (error) {
+        this.logger.warn("metrics_collector_failed", {
+          collector: "outbox_stats",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
+  }
+}
+
 /** Raiz de composição: é aqui, e só aqui, que as portas encontram as implementações. */
 @Module({
   controllers: [
@@ -111,7 +136,14 @@ export class PendingReferenceLifecycle implements OnApplicationBootstrap, OnModu
     { provide: ORM, useFactory: () => MikroORM.init(buildConfig()) },
     { provide: UNIT_OF_WORK, inject: [ORM], useFactory: (orm: MikroORM) => new MikroOrmUnitOfWork(orm) },
     { provide: LOGGER, useFactory: () => new JsonLogger() },
-    { provide: METRICS, useFactory: () => new MetricsRegistry() },
+      {
+      provide: METRICS,
+      useFactory: () => {
+        const registry = new MetricsRegistry();
+        describeMetrics(registry);
+        return registry;
+      },
+    },
     {
       provide: SQS_CLIENT,
       useFactory: () =>
@@ -132,8 +164,9 @@ export class PendingReferenceLifecycle implements OnApplicationBootstrap, OnModu
     },
     {
       provide: ProcessWagerTransactionUseCase,
-      inject: [UNIT_OF_WORK],
-      useFactory: (uow: UnitOfWork) => new ProcessWagerTransactionUseCase({ uow }),
+      inject: [UNIT_OF_WORK, LOGGER, METRICS],
+      useFactory: (uow: UnitOfWork, logger: LoggerPort, metrics: MetricsPort) =>
+        new ProcessWagerTransactionUseCase({ uow, logger, metrics }),
     },
     {
       provide: WagerQueries,
@@ -216,6 +249,13 @@ export class PendingReferenceLifecycle implements OnApplicationBootstrap, OnModu
         }),
     },
     PendingReferenceLifecycle,
+    {
+      provide: ReportOutboxStatsUseCase,
+      inject: [UNIT_OF_WORK, METRICS],
+      useFactory: (uow: UnitOfWork, metrics: MetricsPort) =>
+        new ReportOutboxStatsUseCase({ uow, metrics }),
+    },
+    MetricsCollectorsLifecycle,
     OutboxPublisherLifecycle,
     WagerConsumerLifecycle,
     ResourceLifecycle,

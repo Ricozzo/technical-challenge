@@ -173,15 +173,12 @@ export class WagerQueueConsumer {
       return this.handleFailure(message, error, receiveCount, log);
     }
 
-    if (result.idempotentReplay) {
-      this.deps.metrics.increment("duplicates_detected_total", { source: "sqs" });
-    }
     if (!(await this.ack(message, log))) return "retry";
 
     this.deps.metrics.increment("sqs_messages_processed_total", {
       outcome: result.status.toLowerCase(),
     });
-    log.info("message_processed", {
+    log.debug("message_processed", {
       transactionId: result.transactionId,
       status: result.status,
       idempotentReplay: result.idempotentReplay,

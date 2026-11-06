@@ -66,8 +66,15 @@ export class PublishOutboxUseCase {
       return { claimed: batch.length, published, failed };
     });
 
+    // As métricas só contam o que foi confirmado: se o commit falhar, a rodada inteira é refeita.
     for (const message of outcome.published) {
       this.deps.metrics.increment("outbox_events_published_total", { event_type: message.eventType });
+      if (message.publishedAt) {
+        const lagSeconds = (message.publishedAt.getTime() - message.occurredAt.getTime()) / 1000;
+        this.deps.metrics.observe("outbox_publish_lag_seconds", Math.max(lagSeconds, 0), {
+          event_type: message.eventType,
+        });
+      }
     }
     for (const message of outcome.failed) {
       this.deps.metrics.increment("outbox_publish_failures_total", { event_type: message.eventType });

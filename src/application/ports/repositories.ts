@@ -64,10 +64,16 @@ export interface InboxRepository {
   markProcessed(message: InboxMessage): Promise<void>;
 }
 
+export interface OutboxStats {
+  pending: number;
+  oldestOccurredAt?: Date;
+}
+
 export interface OutboxRepository {
   add(message: OutboxMessage): Promise<void>;
   claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
   save(message: OutboxMessage, opts?: { error?: string }): Promise<void>;
+  stats(): Promise<OutboxStats>;
 }
 
 export interface Repositories {

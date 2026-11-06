@@ -11,6 +11,7 @@ process.env.DB_NAME = process.env.DB_NAME_TEST ?? "wagering_test";
 process.env.OUTBOX_PUBLISHER_ENABLED = "false";
 process.env.SQS_CONSUMER_ENABLED = "false";
 process.env.PENDING_REFERENCE_WORKER_ENABLED = "false";
+process.env.LOG_LEVEL = "warn";
 
 let app: INestApplication;
 let ctx: TestContext;
@@ -344,5 +345,43 @@ describe("health", () => {
     const r = await call("GET", "/rota/que/nao/existe");
     expect(r.status).toBe(404);
     expect(r.body.error.code).toBe("NOT_FOUND");
+  });
+});
+
+// Observabilidade
+
+describe("observabilidade", () => {
+  test("o correlation id é aceito, gerado quando falta e substituído quando inválido", async () => {
+    const given = await call("GET", "/health/live", { headers: { "x-correlation-id": "corr-123" } });
+    expect(given.headers.get("x-correlation-id")).toBe("corr-123");
+
+    const generated = await call("GET", "/health/live");
+    expect(generated.headers.get("x-correlation-id")).toMatch(/^[0-9a-f-]{36}$/);
+
+    const invalid = await call("GET", "/health/live", { headers: { "x-correlation-id": "x y" } });
+    expect(invalid.headers.get("x-correlation-id")).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  test("GET /metrics expõe a latência HTTP por rota, os contadores e os gauges da outbox", async () => {
+    const w = await createWallet("100.00");
+    await call("GET", `/wallets/${w.id}`);
+    await submit(payload(w));
+    await call("GET", "/rota/que/nao/existe");
+
+    const text = (await call("GET", "/metrics")).body as string;
+
+    // O registro vive enquanto a aplicação vive, então os contadores acumulam entre os testes.
+    expect(text).toMatch(
+      /http_request_duration_seconds_count\{method="GET",route="\/wallets\/:walletId",status="200"\} \d+/,
+    );
+    expect(text).toMatch(
+      /http_request_duration_seconds_count\{method="POST",route="\/wagering\/transactions",status="200"\} \d+/,
+    );
+    expect(text).toContain('route="unmatched"');
+    expect(text).toContain("# HELP wager_transactions_total");
+    expect(text).toMatch(/wager_transactions_total\{kind="BET",source="http",status="PROCESSED"\} \d+/);
+    expect(text).toContain("wager_processing_duration_seconds_bucket");
+    expect(text).toMatch(/^outbox_pending_events 3$/m);
+    expect(text).toMatch(/^outbox_oldest_pending_age_seconds /m);
   });
 });

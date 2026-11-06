@@ -16,8 +16,15 @@ import { WagerTransactionKind as Kind } from "../../domain/wager/wager-transacti
 import { WagerTransactionStatus as Status } from "../../domain/wager/wager-transaction-status";
 import type { Wallet } from "../../domain/wallet/wallet";
 import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
+import { classifyLockConflict } from "../lock-conflicts";
 import { computePayloadHash } from "../payload-hash";
 import { nextPendingReferenceAttemptAt, PENDING_REFERENCE_POLICY } from "../pending-reference-policy";
+import {
+  type LoggerPort,
+  type MetricsPort,
+  noopLogger,
+  noopMetrics,
+} from "../ports/observability";
 import type { Repositories, StoredWagerTransaction, UnitOfWork } from "../ports/repositories";
 
 export interface ProcessWagerTransactionCommand {
@@ -45,9 +52,19 @@ export interface ProcessWagerTransactionResult {
 }
 
 export type PendingReferenceOutcome =
-  | { kind: "settled"; attempts: number; result: ProcessWagerTransactionResult }
+  | {
+      kind: "settled";
+      transactionKind: Kind;
+      attempts: number;
+      result: ProcessWagerTransactionResult;
+    }
   | { kind: "waiting"; attempts: number; nextAttemptAt: Date }
-  | { kind: "expired"; attempts: number; result: ProcessWagerTransactionResult };
+  | {
+      kind: "expired";
+      transactionKind: Kind;
+      attempts: number;
+      result: ProcessWagerTransactionResult;
+    };
 
 interface Meta {
   correlationId: string;
@@ -59,11 +76,13 @@ interface Parsed extends Meta {
   inbox?: { consumerName: string; messageId: string };
 }
 
+type Source = "http" | "sqs";
+
 type Retry = { attempts: number; nextAttemptAt: Date | null };
 
 type Decision =
   | { type: "reject"; code: FailureCode }
-  | { type: "wait" }
+  | { type: "wait" } 
   | { type: "record"; referenceId?: string }
   | { type: "move"; direction: LedgerDirection; referenceId?: string };
 
@@ -76,20 +95,46 @@ const reject = (code: FailureCode): Decision => ({ type: "reject", code });
 export class ProcessWagerTransactionUseCase {
   private readonly now: () => Date;
   private readonly newId: () => string;
+  private readonly logger: LoggerPort;
+  private readonly metrics: MetricsPort;
 
   constructor(
-    private readonly deps: { uow: UnitOfWork; now?: () => Date; newId?: () => string },
+    private readonly deps: {
+      uow: UnitOfWork;
+      now?: () => Date;
+      newId?: () => string;
+      logger?: LoggerPort;
+      metrics?: MetricsPort;
+    },
   ) {
     this.now = deps.now ?? (() => new Date());
     this.newId = deps.newId ?? (() => Bun.randomUUIDv7());
+    this.logger = deps.logger ?? noopLogger;
+    this.metrics = deps.metrics ?? noopMetrics;
   }
 
   async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
-    // Payload inválido falha aqui, antes de abrir transação e sem gravar nada.
-    const parsed = this.parse(command);
-    return this.deps.uow.run((repos) => this.process(repos, parsed));
+    const source: Source = command.inbox ? "sqs" : "http";
+    const startedAt = performance.now();
+    let parsed: Parsed | undefined;
+    try {
+      // Payload inválido falha aqui, antes de abrir transação e sem gravar nada.
+      parsed = this.parse(command);
+      const current = parsed;
+      const result = await this.deps.uow.run((repos) => this.process(repos, current));
+
+      this.observeOutcome(current, result, source, startedAt);
+      return result;
+    } catch (error) {
+      this.observeFailure(error, parsed, source, startedAt);
+      throw error;
+    }
   }
 
+  /**
+   * Reavalia, dentro de uma transação já aberta e com a wallet JÁ TRAVADA pelo chamador, uma
+   * transação que aguardava a referência. Usa exatamente as mesmas regras da primeira entrega.
+   */
   async reevaluatePendingReference(
     repos: Repositories,
     stored: StoredWagerTransaction,
@@ -98,6 +143,7 @@ export class ProcessWagerTransactionUseCase {
   ): Promise<PendingReferenceOutcome> {
     const tx = stored.transaction;
     const attempt = stored.attempts + 1;
+  
     const meta: Meta = { correlationId: this.newId(), causationId: tx.id };
 
     const decision = await this.decide(repos, tx, wallet);
@@ -110,7 +156,12 @@ export class ProcessWagerTransactionUseCase {
           retry: { attempts: attempt, nextAttemptAt: null },
         });
         await this.emit(repos, WagerTransactionRejected.from(tx, this.eventContext(meta, at)));
-        return { kind: "expired", attempts: attempt, result: this.toResult(tx, wallet.balance, false) };
+        return {
+          kind: "expired",
+          transactionKind: tx.kind,
+          attempts: attempt,
+          result: this.toResult(tx, wallet.balance, false),
+        };
       }
       const nextAttemptAt = nextPendingReferenceAttemptAt(attempt, at);
       await repos.transactions.save(tx, { retry: { attempts: attempt, nextAttemptAt } });
@@ -121,7 +172,7 @@ export class ProcessWagerTransactionUseCase {
       attempts: attempt,
       nextAttemptAt: null,
     });
-    return { kind: "settled", attempts: attempt, result };
+    return { kind: "settled", transactionKind: tx.kind, attempts: attempt, result };
   }
 
   // Validação
@@ -200,7 +251,9 @@ export class ProcessWagerTransactionUseCase {
     const at = this.now();
 
     // 1. Lock só desta wallet. Quem chega depois espera aqui, e as outras wallets seguem em paralelo.
+    const lockStartedAt = performance.now();
     const wallet = await repos.wallets.findByIdForUpdate(tx.walletId);
+    this.metrics.observe("wallet_lock_wait_seconds", (performance.now() - lockStartedAt) / 1000);
     if (!wallet) throw new WalletNotFoundError(`Wallet ${tx.walletId} was not found`);
 
     // 2. Inbox: se a mensagem já foi vista, segue para o replay idempotente.
@@ -422,5 +475,89 @@ export class ProcessWagerTransactionUseCase {
 
   private async emit(repos: Repositories, event: IntegrationEvent<unknown>): Promise<void> {
     await repos.outbox.add(OutboxMessage.enqueue(event));
+  }
+
+  // Observabilidade
+
+  /** O log e a métrica nunca podem quebrar uma operação que já foi confirmada. */
+  private safely(work: () => void): void {
+    try {
+      work();
+    } catch {
+    }
+  }
+
+  private observeOutcome(
+    parsed: Parsed,
+    result: ProcessWagerTransactionResult,
+    source: Source,
+    startedAt: number,
+  ): void {
+    this.safely(() => {
+      const durationMs = performance.now() - startedAt;
+      const { tx } = parsed;
+
+      this.metrics.observe("wager_processing_duration_seconds", durationMs / 1000, {
+        source,
+        outcome: result.status.toLowerCase(),
+      });
+      if (result.idempotentReplay) {
+        this.metrics.increment("duplicates_detected_total", { source });
+      } else {
+        this.metrics.increment("wager_transactions_total", {
+          kind: tx.kind,
+          status: result.status,
+          source,
+        });
+      }
+
+      this.logger.info("transaction_decided", {
+        correlationId: parsed.correlationId,
+        messageId: parsed.inbox?.messageId,
+        transactionId: result.transactionId,
+        walletId: tx.walletId,
+        providerId: tx.providerId,
+        kind: tx.kind,
+        source,
+        status: result.status,
+        failureCode: result.failureCode,
+        idempotentReplay: result.idempotentReplay,
+        durationMs: Math.round(durationMs),
+      });
+    });
+  }
+
+  private observeFailure(
+    error: unknown,
+    parsed: Parsed | undefined,
+    source: Source,
+    startedAt: number,
+  ): void {
+    this.safely(() => {
+      this.metrics.observe(
+        "wager_processing_duration_seconds",
+        (performance.now() - startedAt) / 1000,
+        { source, outcome: "error" },
+      );
+
+      const context = {
+        correlationId: parsed?.correlationId,
+        messageId: parsed?.inbox?.messageId,
+        walletId: parsed?.tx.walletId,
+        providerId: parsed?.tx.providerId,
+        source,
+      };
+
+      const lockReason = classifyLockConflict(error);
+      if (lockReason) {
+        this.metrics.increment("lock_conflicts_total", { reason: lockReason });
+        this.logger.warn("wallet_lock_conflict", { ...context, reason: lockReason });
+      }
+
+      if (error instanceof IdempotencyConflictError) {
+        this.metrics.increment("idempotency_conflicts_total", { source });
+        this.logger.warn("idempotency_conflict", context);
+      }
+    });
   }
 }

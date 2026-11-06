@@ -3,6 +3,7 @@ import type { LoggerPort } from "../../application/ports/observability";
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 type Level = keyof typeof LEVELS;
 
+/** Log estruturado: uma linha de JSON por evento. */
 export class JsonLogger implements LoggerPort {
   private readonly min: number;
 
@@ -16,6 +17,9 @@ export class JsonLogger implements LoggerPort {
     this.min = LEVELS[levelName as Level] ?? LEVELS.info;
   }
 
+  debug(message: string, fields?: Record<string, unknown>): void {
+    this.log("debug", message, fields);
+  }
   info(message: string, fields?: Record<string, unknown>): void {
     this.log("info", message, fields);
   }

@@ -1,7 +1,9 @@
 import { FailureCode } from "../../domain/wager/failure-code";
+import type { WagerTransactionKind } from "../../domain/wager/wager-transaction-kind";
 import { WagerTransactionStatus as Status } from "../../domain/wager/wager-transaction-status";
 import type { Wallet } from "../../domain/wallet/wallet";
 import { WalletNotFoundError } from "../errors";
+import { classifyLockConflict } from "../lock-conflicts";
 import { nextPendingReferenceAttemptAt, PENDING_REFERENCE_POLICY } from "../pending-reference-policy";
 import type { LoggerPort, MetricsPort } from "../ports/observability";
 import type {
@@ -32,6 +34,8 @@ export interface RetryPendingReferencesResult {
 }
 
 type ItemOutcome = { kind: "skipped" } | PendingReferenceOutcome;
+
+const SOURCE = "pending_reference_worker";
 
 const describeError = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -87,6 +91,8 @@ export class RetryPendingReferencesUseCase {
       } catch (error) {
         // Uma transação que quebra não pode travar as demais: segue para a próxima.
         result.errors++;
+        const lockReason = classifyLockConflict(error);
+        if (lockReason) this.deps.metrics.increment("lock_conflicts_total", { reason: lockReason });
         log.error("pending_reference_retry_failed", { error: describeError(error) });
         this.deps.metrics.increment("pending_reference_retries_total", { outcome: "error" });
         await this.recordFailure(candidate, log);
@@ -106,6 +112,11 @@ export class RetryPendingReferencesUseCase {
         case "expired":
           result.expired++;
           this.deps.metrics.increment("pending_reference_retries_total", { outcome: "expired" });
+          this.deps.metrics.increment("wager_transactions_total", {
+            kind: outcome.transactionKind,
+            status: outcome.result.status,
+            source: SOURCE,
+          });
           log.warn("pending_reference_expired", {
             attempts: outcome.attempts,
             failureCode: outcome.result.failureCode,
@@ -118,6 +129,11 @@ export class RetryPendingReferencesUseCase {
           else result.rejected++;
           this.deps.metrics.increment("pending_reference_retries_total", {
             outcome: status.toLowerCase(),
+          });
+          this.deps.metrics.increment("wager_transactions_total", {
+            kind: outcome.transactionKind,
+            status,
+            source: SOURCE,
           });
           log.info("pending_reference_settled", {
             status,
@@ -134,7 +150,10 @@ export class RetryPendingReferencesUseCase {
 
   private retryOne(candidate: DuePendingReference, roundStartedAt: Date): Promise<ItemOutcome> {
     return this.deps.uow.run(async (repos): Promise<ItemOutcome> => {
+      // Ordem de locks: wallet e depois transação, a mesma do caminho principal. Sem ciclo, sem deadlock.
+      const lockStartedAt = performance.now();
       const wallet = await repos.wallets.findByIdForUpdate(candidate.walletId);
+      this.deps.metrics.observe("wallet_lock_wait_seconds", (performance.now() - lockStartedAt) / 1000);
       if (!wallet) throw new WalletNotFoundError(`Wallet ${candidate.walletId} was not found`);
 
       const stored = await repos.transactions.findByIdForUpdate(candidate.id);
@@ -157,28 +176,36 @@ export class RetryPendingReferencesUseCase {
   private async recordFailure(candidate: DuePendingReference, log: LoggerPort): Promise<void> {
     try {
       const at = this.now();
-      const marked = await this.deps.uow.run(async (repos) => {
-        const stored = await repos.transactions.findByIdForUpdate(candidate.id);
-        if (!stored || stored.transaction.status !== Status.PendingReference) return false;
+      const failedKind = await this.deps.uow.run(
+        async (repos): Promise<WagerTransactionKind | undefined> => {
+          const stored = await repos.transactions.findByIdForUpdate(candidate.id);
+          if (!stored || stored.transaction.status !== Status.PendingReference) return undefined;
 
-        const tx = stored.transaction;
-        const attempt = stored.attempts + 1;
-        if (attempt >= PENDING_REFERENCE_POLICY.maxAttempts) {
-          tx.fail(FailureCode.InternalError);
-          await repos.transactions.save(tx, { retry: { attempts: attempt, nextAttemptAt: null } });
-          return true;
-        }
-        await repos.transactions.save(tx, {
-          retry: { attempts: attempt, nextAttemptAt: nextPendingReferenceAttemptAt(attempt, at) },
-        });
-        return false;
-      });
+          const tx = stored.transaction;
+          const attempt = stored.attempts + 1;
+          if (attempt >= PENDING_REFERENCE_POLICY.maxAttempts) {
+            tx.fail(FailureCode.InternalError);
+            await repos.transactions.save(tx, { retry: { attempts: attempt, nextAttemptAt: null } });
+            return tx.kind;
+          }
+          await repos.transactions.save(tx, {
+            retry: { attempts: attempt, nextAttemptAt: nextPendingReferenceAttemptAt(attempt, at) },
+          });
+          return undefined;
+        },
+      );
 
-      if (marked) {
+      if (failedKind !== undefined) {
         this.deps.metrics.increment("pending_reference_retries_total", { outcome: "failed" });
+        this.deps.metrics.increment("wager_transactions_total", {
+          kind: failedKind,
+          status: Status.Failed,
+          source: SOURCE,
+        });
         log.error("pending_reference_failed_permanently", { failureCode: FailureCode.InternalError });
       }
     } catch (error) {
+      // Com o banco fora do ar, nada a fazer: a próxima rodada tenta de novo.
       log.warn("pending_reference_failure_not_recorded", { error: describeError(error) });
     }
   }

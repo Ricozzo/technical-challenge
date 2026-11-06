@@ -1,5 +1,5 @@
 import type { EntityManager } from "@mikro-orm/postgresql";
-import type { OutboxRepository } from "../../../application/ports/repositories";
+import type { OutboxRepository, OutboxStats } from "../../../application/ports/repositories";
 import { OutboxMessage } from "../../../domain/messaging/outbox-message";
 import { query, type Row } from "../db-helpers";
 
@@ -69,5 +69,18 @@ export class SqlOutboxRepository implements OutboxRepository {
       ],
     );
     if (rows.length !== 1) throw new Error(`Outbox message ${message.id} was not found`);
+  }
+  async stats(): Promise<OutboxStats> {
+    const rows = await query(
+      this.em,
+      `select count(*)::int as pending, min(occurred_at) as oldest
+         from outbox_messages
+        where published_at is null`,
+    );
+    const row = rows[0];
+    return {
+      pending: Number(row?.pending ?? 0),
+      oldestOccurredAt: row?.oldest ? new Date(row.oldest) : undefined,
+    };
   }
 }

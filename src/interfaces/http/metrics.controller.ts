@@ -8,7 +8,8 @@ export class MetricsController {
   constructor(@Inject(METRICS) private readonly metrics: MetricsRegistry) {}
 
   @Get()
-  render(@Res() res: Response): void {
+  async render(@Res() res: Response): Promise<void> {
+    await this.metrics.collect();
     res.type("text/plain; version=0.0.4").send(this.metrics.render());
   }
 }
