@@ -17,7 +17,7 @@ import { WagerTransactionStatus as Status } from "../../domain/wager/wager-trans
 import type { Wallet } from "../../domain/wallet/wallet";
 import { IdempotencyConflictError, WalletNotFoundError } from "../errors";
 import { computePayloadHash } from "../payload-hash";
-import { nextPendingReferenceAttemptAt } from "../pending-reference-policy";
+import { nextPendingReferenceAttemptAt, PENDING_REFERENCE_POLICY } from "../pending-reference-policy";
 import type { Repositories, StoredWagerTransaction, UnitOfWork } from "../ports/repositories";
 
 export interface ProcessWagerTransactionCommand {
@@ -44,18 +44,30 @@ export interface ProcessWagerTransactionResult {
   idempotentReplay: boolean;
 }
 
-interface Parsed {
-  tx: WagerTransaction;
+export type PendingReferenceOutcome =
+  | { kind: "settled"; attempts: number; result: ProcessWagerTransactionResult }
+  | { kind: "waiting"; attempts: number; nextAttemptAt: Date }
+  | { kind: "expired"; attempts: number; result: ProcessWagerTransactionResult };
+
+interface Meta {
   correlationId: string;
   causationId: string;
+}
+
+interface Parsed extends Meta {
+  tx: WagerTransaction;
   inbox?: { consumerName: string; messageId: string };
 }
+
+type Retry = { attempts: number; nextAttemptAt: Date | null };
 
 type Decision =
   | { type: "reject"; code: FailureCode }
   | { type: "wait" }
   | { type: "record"; referenceId?: string }
   | { type: "move"; direction: LedgerDirection; referenceId?: string };
+
+type Settleable = Exclude<Decision, { type: "wait" }>;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -73,8 +85,43 @@ export class ProcessWagerTransactionUseCase {
   }
 
   async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
+    // Payload inválido falha aqui, antes de abrir transação e sem gravar nada.
     const parsed = this.parse(command);
     return this.deps.uow.run((repos) => this.process(repos, parsed));
+  }
+
+  async reevaluatePendingReference(
+    repos: Repositories,
+    stored: StoredWagerTransaction,
+    wallet: Wallet,
+    at: Date,
+  ): Promise<PendingReferenceOutcome> {
+    const tx = stored.transaction;
+    const attempt = stored.attempts + 1;
+    const meta: Meta = { correlationId: this.newId(), causationId: tx.id };
+
+    const decision = await this.decide(repos, tx, wallet);
+
+    if (decision.type === "wait") {
+      if (attempt >= PENDING_REFERENCE_POLICY.maxAttempts) {
+        tx.reject(FailureCode.ReferenceNotFound);
+        await repos.transactions.save(tx, {
+          resultingBalance: wallet.balance,
+          retry: { attempts: attempt, nextAttemptAt: null },
+        });
+        await this.emit(repos, WagerTransactionRejected.from(tx, this.eventContext(meta, at)));
+        return { kind: "expired", attempts: attempt, result: this.toResult(tx, wallet.balance, false) };
+      }
+      const nextAttemptAt = nextPendingReferenceAttemptAt(attempt, at);
+      await repos.transactions.save(tx, { retry: { attempts: attempt, nextAttemptAt } });
+      return { kind: "waiting", attempts: attempt, nextAttemptAt };
+    }
+
+    const result = await this.applyDecision(repos, tx, wallet, decision, meta, at, {
+      attempts: attempt,
+      nextAttemptAt: null,
+    });
+    return { kind: "settled", attempts: attempt, result };
   }
 
   // Validação
@@ -156,6 +203,7 @@ export class ProcessWagerTransactionUseCase {
     const wallet = await repos.wallets.findByIdForUpdate(tx.walletId);
     if (!wallet) throw new WalletNotFoundError(`Wallet ${tx.walletId} was not found`);
 
+    // 2. Inbox: se a mensagem já foi vista, segue para o replay idempotente.
     const inbox = p.inbox
       ? InboxMessage.receive({
           messageId: p.inbox.messageId,
@@ -183,6 +231,7 @@ export class ProcessWagerTransactionUseCase {
   ): Promise<ProcessWagerTransactionResult> {
     const { tx } = p;
 
+    // 3. Idempotência persistente.
     const existing = await this.findExisting(repos, tx);
     if (existing) return this.replay(existing, tx.payloadHash);
 
@@ -192,34 +241,44 @@ export class ProcessWagerTransactionUseCase {
       return this.replay(winner, tx.payloadHash);
     }
 
+    // 4. Regras de negócio.
     const decision = await this.decide(repos, tx, wallet);
-    const ctx = (): EventContext => ({
-      eventId: this.newId(),
-      correlationId: p.correlationId,
-      causationId: p.causationId,
-      occurredAt: at,
-    });
+
+    if (decision.type === "wait") {
+      tx.markPendingReference();
+      await repos.transactions.save(tx, {
+        retry: { attempts: 0, nextAttemptAt: nextPendingReferenceAttemptAt(0, at) },
+      });
+      await this.emit(repos, WagerTransactionPendingReference.from(tx, this.eventContext(p, at)));
+      return this.toResult(tx, undefined, false);
+    }
+
+    return this.applyDecision(repos, tx, wallet, decision, p, at);
+  }
+
+  /** Grava o desfecho: saldo, ledger, transação e eventos. Tudo na transação SQL que já está aberta. */
+  private async applyDecision(
+    repos: Repositories,
+    tx: WagerTransaction,
+    wallet: Wallet,
+    decision: Settleable,
+    meta: Meta,
+    at: Date,
+    retry?: Retry,
+  ): Promise<ProcessWagerTransactionResult> {
+    const ctx = () => this.eventContext(meta, at);
 
     switch (decision.type) {
       case "reject": {
         tx.reject(decision.code);
-        await repos.transactions.save(tx, { resultingBalance: wallet.balance });
+        await repos.transactions.save(tx, { resultingBalance: wallet.balance, retry });
         await this.emit(repos, WagerTransactionRejected.from(tx, ctx()));
         return this.toResult(tx, wallet.balance, false);
       }
 
-      case "wait": {
-        tx.markPendingReference();
-        await repos.transactions.save(tx, {
-          retry: { attempts: 0, nextAttemptAt: nextPendingReferenceAttemptAt(0, at) },
-        });
-        await this.emit(repos, WagerTransactionPendingReference.from(tx, ctx()));
-        return this.toResult(tx, undefined, false);
-      }
-
       case "record": {
         tx.markProcessed(decision.referenceId, at);
-        await repos.transactions.save(tx, { resultingBalance: wallet.balance });
+        await repos.transactions.save(tx, { resultingBalance: wallet.balance, retry });
         await this.emit(repos, WagerTransactionProcessed.from(tx, wallet.balance, ctx()));
         return this.toResult(tx, wallet.balance, false);
       }
@@ -236,7 +295,7 @@ export class ProcessWagerTransactionUseCase {
         await repos.wallets.save(wallet, expectedVersion);
 
         tx.markProcessed(decision.referenceId, at);
-        await repos.transactions.save(tx, { resultingBalance: wallet.balance });
+        await repos.transactions.save(tx, { resultingBalance: wallet.balance, retry });
 
         await this.emit(repos, WagerTransactionProcessed.from(tx, wallet.balance, ctx()));
         await this.emit(repos, WalletBalanceChanged.from(wallet, entry, ctx()));
@@ -349,6 +408,15 @@ export class ProcessWagerTransactionUseCase {
       ...(balance !== undefined && { balance }),
       ...(tx.failureCode !== undefined && { failureCode: tx.failureCode }),
       idempotentReplay,
+    };
+  }
+
+  private eventContext(meta: Meta, at: Date): EventContext {
+    return {
+      eventId: this.newId(),
+      correlationId: meta.correlationId,
+      causationId: meta.causationId,
+      occurredAt: at,
     };
   }
 

@@ -21,6 +21,11 @@ export interface WalletRepository {
   save(wallet: Wallet, expectedVersion: number): Promise<void>;
 }
 
+export interface DuePendingReference {
+  id: string;
+  walletId: string;
+}
+
 export interface WagerTransactionRepository {
   /** INSERT ... ON CONFLICT DO NOTHING. false se a idempotência já foi registrada. */
   insertIfAbsent(tx: WagerTransaction): Promise<boolean>;
@@ -28,6 +33,7 @@ export interface WagerTransactionRepository {
   findByIdempotencyKey(providerId: string, key: string): Promise<StoredWagerTransaction | undefined>;
   findByExternalId(providerId: string, externalId: string): Promise<StoredWagerTransaction | undefined>;
   existsProcessedReversalOf(referenceTransactionId: string): Promise<boolean>;
+
   save(
     tx: WagerTransaction,
     opts?: {
@@ -35,6 +41,8 @@ export interface WagerTransactionRepository {
       retry?: { attempts: number; nextAttemptAt: Date | null };
     },
   ): Promise<void>;
+  listDuePendingReference(now: Date, limit: number): Promise<DuePendingReference[]>;
+  findByIdForUpdate(id: string): Promise<StoredWagerTransaction | undefined>;
 }
 
 export interface ReconciliationSnapshot {

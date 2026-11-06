@@ -1,4 +1,6 @@
 import { SQSClient } from "@aws-sdk/client-sqs";
+import { RetryPendingReferencesUseCase } from "./application/use-cases/retry-pending-references";
+import { PendingReferenceWorker } from "./interfaces/workers/pending-reference.worker";
 import {
   Inject,
   Injectable,
@@ -29,6 +31,7 @@ import { WageringController } from "./interfaces/http/wagering.controller";
 import { WalletsController } from "./interfaces/http/wallets.controller";
 import { WagerQueueConsumer } from "./interfaces/sqs/wager-consumer";
 import { EVENT_PUBLISHER, LOGGER, METRICS, ORM, SQS_CLIENT, UNIT_OF_WORK } from "./tokens";
+
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -78,6 +81,20 @@ export class WagerConsumerLifecycle implements OnApplicationBootstrap, OnModuleD
 
   async onModuleDestroy(): Promise<void> {
     await this.consumer.stop();
+  }
+}
+
+/** Liga o worker de PENDING_REFERENCE no boot e o desliga, esperando a rodada em andamento, no encerramento. */
+@Injectable()
+export class PendingReferenceLifecycle implements OnApplicationBootstrap, OnModuleDestroy {
+  constructor(@Inject(PendingReferenceWorker) private readonly worker: PendingReferenceWorker) {}
+
+  onApplicationBootstrap(): void {
+    if (process.env.PENDING_REFERENCE_WORKER_ENABLED !== "false") this.worker.start();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.worker.stop();
   }
 }
 
@@ -171,6 +188,34 @@ export class WagerConsumerLifecycle implements OnApplicationBootstrap, OnModuleD
           waitTimeSeconds: Number(process.env.SQS_CONSUMER_WAIT_TIME_SECONDS ?? 20),
         }),
     },
+        {
+      provide: RetryPendingReferencesUseCase,
+      inject: [UNIT_OF_WORK, ProcessWagerTransactionUseCase, LOGGER, METRICS],
+      useFactory: (
+        uow: UnitOfWork,
+        processor: ProcessWagerTransactionUseCase,
+        logger: LoggerPort,
+        metrics: MetricsPort,
+      ) =>
+        new RetryPendingReferencesUseCase({
+          uow,
+          evaluator: processor,
+          logger,
+          metrics,
+          batchSize: Number(process.env.PENDING_REFERENCE_BATCH_SIZE ?? 20),
+        }),
+    },
+    {
+      provide: PendingReferenceWorker,
+      inject: [RetryPendingReferencesUseCase, LOGGER],
+      useFactory: (useCase: RetryPendingReferencesUseCase, logger: LoggerPort) =>
+        new PendingReferenceWorker({
+          useCase,
+          logger,
+          idleDelayMs: Number(process.env.PENDING_REFERENCE_POLL_INTERVAL_MS ?? 1000),
+        }),
+    },
+    PendingReferenceLifecycle,
     OutboxPublisherLifecycle,
     WagerConsumerLifecycle,
     ResourceLifecycle,

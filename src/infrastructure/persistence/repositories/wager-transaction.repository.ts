@@ -1,5 +1,6 @@
 import type { EntityManager } from "@mikro-orm/postgresql";
 import type {
+  DuePendingReference,
   StoredWagerTransaction,
   WagerTransactionRepository,
 } from "../../../application/ports/repositories";
@@ -127,6 +128,27 @@ export class SqlWagerTransactionRepository implements WagerTransactionRepository
       [referenceTransactionId],
     );
     return rows.length > 0;
+  }
+  
+  async findByIdForUpdate(id: string): Promise<StoredWagerTransaction | undefined> {
+    const rows = await query(
+      this.em,
+      `select ${COLUMNS} from wager_transactions where id = ? for update`,
+      [id],
+    );
+    return rows[0] ? toStored(rows[0]) : undefined;
+  }
+
+  async listDuePendingReference(now: Date, limit: number): Promise<DuePendingReference[]> {
+    const rows = await query(
+      this.em,
+      `select id, wallet_id from wager_transactions
+        where status = 'PENDING_REFERENCE' and next_attempt_at <= ?
+        order by next_attempt_at, id
+        limit ?`,
+      [now, limit],
+    );
+    return rows.map((row) => ({ id: row.id, walletId: row.wallet_id }));
   }
 
   async save(
