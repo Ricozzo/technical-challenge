@@ -10,7 +10,9 @@
     "migration:up": "bun src/infrastructure/persistence/migrate.ts up",
     "migration:down": "bun src/infrastructure/persistence/migrate.ts down",
     "migration:reset": "bun src/infrastructure/persistence/migrate.ts reset",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "start": "bun src/main.ts",
+    "dev": "bun --watch src/main.ts"
   },
   "devDependencies": {
     "@mikro-orm/cli": "^7.2.7",

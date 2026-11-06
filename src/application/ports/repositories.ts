@@ -37,9 +37,17 @@ export interface WagerTransactionRepository {
   ): Promise<void>;
 }
 
+export interface ReconciliationSnapshot {
+  stored: Money;
+  calculated: Money;
+  entries: number;
+}
+
 export interface LedgerRepository {
   append(entry: WalletLedgerEntry): Promise<void>;
   reconstructBalance(walletId: string, currency: string): Promise<{ balance: Money; entries: number }>;
+  listPage(walletId: string, opts: { before?: string; limit: number }): Promise<LedgerPage>;
+  reconcile(walletId: string): Promise<ReconciliationSnapshot | undefined>;
 }
 
 export interface InboxRepository {
@@ -62,4 +70,9 @@ export interface Repositories {
 
 export interface UnitOfWork {
   run<T>(work: (repos: Repositories) => Promise<T>): Promise<T>;
+}
+
+export interface LedgerPage {
+  items: Array<{ seq: string; entry: WalletLedgerEntry }>;
+  hasMore: boolean;
 }
