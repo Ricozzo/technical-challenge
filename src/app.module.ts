@@ -27,6 +27,7 @@ import { MetricsController } from "./interfaces/http/metrics.controller";
 import { ProvidersController } from "./interfaces/http/providers.controller";
 import { WageringController } from "./interfaces/http/wagering.controller";
 import { WalletsController } from "./interfaces/http/wallets.controller";
+import { WagerQueueConsumer } from "./interfaces/sqs/wager-consumer";
 import { EVENT_PUBLISHER, LOGGER, METRICS, ORM, SQS_CLIENT, UNIT_OF_WORK } from "./tokens";
 
 function requiredEnv(name: string): string {
@@ -37,7 +38,7 @@ function requiredEnv(name: string): string {
 
 /**
  * Fecha o pool do banco e o cliente SQS por último. O onApplicationShutdown só roda depois
- * de todos os onModuleDestroy, então o worker já terminou o que estava fazendo.
+ * de todos os onModuleDestroy, então o consumidor e o publisher já terminaram o que faziam.
  */
 @Injectable()
 export class ResourceLifecycle implements OnApplicationShutdown {
@@ -63,6 +64,20 @@ export class OutboxPublisherLifecycle implements OnApplicationBootstrap, OnModul
 
   async onModuleDestroy(): Promise<void> {
     await this.worker.stop();
+  }
+}
+
+/** Liga o consumidor SQS no boot e, no SIGTERM, conclui a mensagem em andamento antes de sair. */
+@Injectable()
+export class WagerConsumerLifecycle implements OnApplicationBootstrap, OnModuleDestroy {
+  constructor(@Inject(WagerQueueConsumer) private readonly consumer: WagerQueueConsumer) {}
+
+  onApplicationBootstrap(): void {
+    if (process.env.SQS_CONSUMER_ENABLED !== "false") this.consumer.start();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.consumer.stop();
   }
 }
 
@@ -136,7 +151,28 @@ export class OutboxPublisherLifecycle implements OnApplicationBootstrap, OnModul
           idleDelayMs: Number(process.env.OUTBOX_POLL_INTERVAL_MS ?? 500),
         }),
     },
+    {
+      provide: WagerQueueConsumer,
+      inject: [SQS_CLIENT, ProcessWagerTransactionUseCase, LOGGER, METRICS],
+      useFactory: (
+        sqs: SQSClient,
+        processor: ProcessWagerTransactionUseCase,
+        logger: LoggerPort,
+        metrics: MetricsPort,
+      ) =>
+        new WagerQueueConsumer({
+          sqs,
+          queueUrl: requiredEnv("SQS_WAGER_QUEUE_URL"),
+          dlqUrl: requiredEnv("SQS_WAGER_DLQ_URL"),
+          processor,
+          logger,
+          metrics,
+          maxAttempts: Number(process.env.SQS_CONSUMER_MAX_ATTEMPTS ?? 5),
+          waitTimeSeconds: Number(process.env.SQS_CONSUMER_WAIT_TIME_SECONDS ?? 20),
+        }),
+    },
     OutboxPublisherLifecycle,
+    WagerConsumerLifecycle,
     ResourceLifecycle,
   ],
 })

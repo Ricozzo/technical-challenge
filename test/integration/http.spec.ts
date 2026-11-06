@@ -9,6 +9,7 @@ import { createTestContext, type TestContext } from "../helpers/test-database";
 
 process.env.DB_NAME = process.env.DB_NAME_TEST ?? "wagering_test";
 process.env.OUTBOX_PUBLISHER_ENABLED = "false";
+process.env.SQS_CONSUMER_ENABLED = "false";
 
 let app: INestApplication;
 let ctx: TestContext;
